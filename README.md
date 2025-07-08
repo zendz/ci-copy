@@ -119,30 +119,43 @@ The application automatically detects ECR repository URLs from your configured A
 ci-copy check
 ci-copy doctor  # alias for 'check'
 
-# Copy a single container image from source to target environment
+# Local development using AWS profiles
 ci-copy --source-profile source-profile --target-profile target-profile \
         --repository your-app-service \
         --tag release-v.1.0.0 \
         --region us-east-1
 
+# CI/CD using IAM roles (recommended for automated environments)
+ci-copy --source-role arn:aws:iam::123456789012:role/ECRSourceRole \
+        --target-role arn:aws:iam::987654321098:role/ECRTargetRole \
+        --images "app-service:v1.0.0,web-service:v1.0.1" \
+        --ci-mode --output json
+
 # Use default configuration file (ci-copy.yaml in current directory)
 ci-copy
 
-# Specify custom configuration file using different formats
-ci-copy -c example.yaml
-ci-copy -c=example.yaml
-ci-copy --config example.yaml
-ci-copy --config=example.yaml
+# Environment-specific configuration files
+ci-copy -c ci-copy-dev.yaml    # Development
+ci-copy -c ci-copy-prod.yaml   # Production
 
 # Copy multiple images with inline specification
 ci-copy --images "your-app-service:release-v.1.0.0,your-web-service:release-v.1.0.1"
 
-# Force Docker method on Linux/macOS (useful for testing or specific requirements)
+# CI/CD optimized: parallel, timeout, retry configuration
+ci-copy --ci-mode --parallel 4 --timeout 1800 --retry 3 \
+        --images "app1:v1,app2:v1,app3:v1" \
+        --output json
+
+# Force Docker method on Linux/macOS (useful for testing)
 ci-copy --source-profile source-profile --target-profile target-profile \
         --repository your-app-service \
         --tag release-v.1.0.0 \
-        --region us-east-1 \
         --force-docker
+
+# Fast mode for CI with minimal verification
+ci-copy --ci-mode --fast --no-verify \
+        --images "quick-deploy:latest" \
+        --quiet
 ```
 
 ### Configuration File Example
@@ -150,6 +163,7 @@ ci-copy --source-profile source-profile --target-profile target-profile \
 Create a `ci-copy.yaml` file (default configuration file name):
 
 ```yaml
+# Development/Local configuration (using profiles)
 source:
   profile: source-profile
   region: us-east-1
@@ -158,12 +172,36 @@ target:
   profile: target-profile
   region: us-east-1
 
+# CI/CD configuration (using IAM roles)
+# source:
+#   role: arn:aws:iam::123456789012:role/ECRSourceRole
+#   region: us-east-1
+#   session_name: ci-copy-dev-session
+#   duration: 3600
+
+# target:
+#   role: arn:aws:iam::987654321098:role/ECRTargetRole
+#   region: us-east-1
+#   session_name: ci-copy-prod-session
+#   duration: 3600
+
 # Simple string format (recommended - Docker compatible)
 images:
   - your-app-service:release-v.1.0.0
   - your-web-service:release-v.1.0.1
   - another-service:latest
   - microservice-api:v2.1.3
+
+# CI/CD specific settings
+settings:
+  parallel: 4
+  timeout: 1800  # 30 minutes
+  retry_count: 3
+  retry_delay: 30
+  verify: true
+  ci_mode: false  # Set to true for CI/CD environments
+  output_format: text  # text or json
+  log_level: info  # debug, info, warn, error
 
 # Alternative object format (for advanced use cases with future extensibility)
 # images:
@@ -174,19 +212,71 @@ images:
 #     # Future: additional fields like platform, digest, etc.
 ```
 
+### Environment-Specific Configuration Files
+
+```yaml
+# ci-copy-dev.yaml (Development environment)
+source:
+  profile: dev-profile
+  region: us-east-1
+
+target:
+  profile: staging-profile
+  region: us-east-1
+
+settings:
+  parallel: 2
+  verify: true
+  log_level: debug
+
+images:
+  - app-service:dev-latest
+  - web-service:dev-latest
+```
+
+```yaml
+# ci-copy-prod.yaml (Production CI/CD)
+source:
+  role: arn:aws:iam::123456789012:role/ECRSourceRole
+  region: us-east-1
+  session_name: prod-deployment
+
+target:
+  role: arn:aws:iam::987654321098:role/ECRTargetRole
+  region: us-east-1
+  session_name: prod-deployment
+
+settings:
+  parallel: 4
+  timeout: 3600
+  retry_count: 5
+  verify: true
+  ci_mode: true
+  output_format: json
+  fail_fast: false
+
+images:
+  - app-service:${IMAGE_TAG}
+  - web-service:${IMAGE_TAG}
+  - api-service:${IMAGE_TAG}
+```
+
 ### Input Methods Comparison
 
 | Method | Format | Use Case | Example |
 |--------|--------|----------|---------|
-| **Config File (Recommended)** | `repo:tag` | Multiple images, reusable | `ci-copy` |
+| **Config File (Local)** | `profile` | Development, manual ops | `ci-copy -c dev.yaml` |
+| **Config File (CI/CD)** | `role` | Automated deployments | `ci-copy -c prod.yaml` |
 | **Inline Images** | `repo:tag,repo:tag` | Quick batch copy | `--images "app:v1,web:v2"` |
 | **Single Image** | Separate params | One-off copy | `--repository app --tag v1` |
+| **Environment Variables** | `AWS_*` vars | CI/CD with dynamic values | `AWS_ROLE_ARN=... ci-copy` |
 
 > **Note**: 
 > - The application automatically looks for `ci-copy.yaml` in the current directory when no config file is specified
 > - Use the string format (`repository:tag`) for simplicity and Docker compatibility
-> - Replace `source-profile` and `target-profile` with your actual AWS profile names, and update regions as needed
-> - ECR URLs will be automatically detected from the profiles
+> - For CI/CD: Use IAM roles instead of profiles for better security and credential management
+> - Environment variable substitution is supported in config files (e.g., `${IMAGE_TAG}`)
+> - Replace example ARNs and profiles with your actual AWS resources
 
 ### Command Line Options
 
@@ -227,7 +317,250 @@ The application follows this process with optimized copying methods per platform
 7. **Verification**: Compare SHA256 hashes to ensure successful copy
 8. **Cleanup**: Remove local images to free up disk space
 
-## System Check & Diagnostics
+## CI/CD Pipeline Integration
+
+CI Copy is designed to work seamlessly in automated CI/CD environments with support for assume roles, environment variables, and non-interactive operations.
+
+### IAM Role Support
+
+```bash
+# Using assume role (recommended for CI/CD)
+ci-copy --source-role arn:aws:iam::123456789012:role/ECRSourceRole \
+        --target-role arn:aws:iam::987654321098:role/ECRTargetRole \
+        --images "app-service:v1.0.0,web-service:v1.0.1" \
+        --region us-east-1
+
+# Using environment variables (common in CI/CD)
+export AWS_ROLE_ARN="arn:aws:iam::123456789012:role/ECRRole"
+export AWS_ROLE_SESSION_NAME="ci-copy-session"
+ci-copy --images "app:v1.0.0" --region us-east-1
+
+# Mixed mode: different roles for source and target
+ci-copy --source-role arn:aws:iam::123456789012:role/DevRole \
+        --target-role arn:aws:iam::987654321098:role/ProdRole \
+        --config ci-copy.yaml
+```
+
+### Environment Variable Configuration
+
+CI Copy supports standard AWS environment variables and CI-specific configurations:
+
+```bash
+# AWS Credentials (standard)
+export AWS_ACCESS_KEY_ID="AKIA..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_SESSION_TOKEN="..."
+export AWS_DEFAULT_REGION="us-east-1"
+
+# Assume Role Configuration
+export AWS_ROLE_ARN="arn:aws:iam::ACCOUNT:role/ROLE_NAME"
+export AWS_ROLE_SESSION_NAME="ci-copy-session-$(date +%s)"
+export AWS_ROLE_DURATION_SECONDS="3600"
+
+# CI Copy Specific
+export CI_COPY_CONFIG="production.yaml"
+export CI_COPY_PARALLEL="4"
+export CI_COPY_TIMEOUT="1800"  # 30 minutes
+export CI_COPY_RETRY_COUNT="3"
+export CI_COPY_LOG_LEVEL="info"  # info, warn, error, debug
+```
+
+### CI-Optimized Features
+
+#### Non-Interactive Mode
+```bash
+# Fully automated operation with no user prompts
+ci-copy --ci-mode --images "app:v1.0.0" --region us-east-1
+
+# Machine-readable JSON output for CI parsing
+ci-copy --output json --images "app:v1.0.0" > copy-results.json
+
+# Quiet mode (errors only)
+ci-copy --quiet --images "app:v1.0.0"
+```
+
+#### Timeout and Retry Configuration
+```bash
+# Configure timeouts and retries for CI stability
+ci-copy --timeout 1800 --retry 3 --retry-delay 30 \
+        --images "large-app:v1.0.0"
+
+# Fail fast mode for quick CI feedback
+ci-copy --fail-fast --images "app1:v1,app2:v2,app3:v3"
+```
+
+### Sample CI Pipeline Configurations
+
+#### GitHub Actions
+```yaml
+name: Copy Container Images
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  copy-images:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsRole
+        aws-region: us-east-1
+    
+    - name: Download CI Copy
+      run: |
+        curl -L https://github.com/your-org/ci-copy/releases/latest/download/ci-copy-linux > ci-copy
+        chmod +x ci-copy
+    
+    - name: Check dependencies
+      run: ./ci-copy check --ci-mode
+    
+    - name: Copy images to production
+      run: |
+        ./ci-copy --ci-mode --output json \
+          --source-role arn:aws:iam::123456789012:role/DevECRRole \
+          --target-role arn:aws:iam::987654321098:role/ProdECRRole \
+          --images "myapp:${{ github.ref_name }}" \
+          --timeout 1800 --retry 3
+```
+
+#### GitLab CI
+```yaml
+stages:
+  - build
+  - deploy
+
+copy-to-production:
+  stage: deploy
+  image: alpine:latest
+  variables:
+    AWS_DEFAULT_REGION: us-east-1
+    CI_COPY_LOG_LEVEL: info
+  before_script:
+    - apk add --no-cache curl
+    - curl -L https://github.com/your-org/ci-copy/releases/latest/download/ci-copy-linux > ci-copy
+    - chmod +x ci-copy
+  script:
+    - ./ci-copy check --ci-mode
+    - |
+      ./ci-copy --ci-mode --quiet \
+        --source-role $SOURCE_ECR_ROLE \
+        --target-role $TARGET_ECR_ROLE \
+        --images "$CI_PROJECT_NAME:$CI_COMMIT_TAG" \
+        --region $AWS_DEFAULT_REGION
+  only:
+    - tags
+```
+
+#### Jenkins Pipeline
+```groovy
+pipeline {
+    agent any
+    
+    environment {
+        AWS_DEFAULT_REGION = 'us-east-1'
+        CI_COPY_TIMEOUT = '1800'
+        CI_COPY_RETRY_COUNT = '3'
+    }
+    
+    stages {
+        stage('Setup') {
+            steps {
+                sh '''
+                    curl -L https://github.com/your-org/ci-copy/releases/latest/download/ci-copy-linux > ci-copy
+                    chmod +x ci-copy
+                '''
+            }
+        }
+        
+        stage('Health Check') {
+            steps {
+                sh './ci-copy check --ci-mode --output json > health-check.json'
+                archiveArtifacts artifacts: 'health-check.json'
+            }
+        }
+        
+        stage('Copy Images') {
+            steps {
+                withAWS(role: 'arn:aws:iam::123456789012:role/JenkinsECRRole') {
+                    sh '''
+                        ./ci-copy --ci-mode --output json \
+                          --images "${IMAGE_NAME}:${BUILD_NUMBER}" \
+                          --timeout ${CI_COPY_TIMEOUT} \
+                          --retry ${CI_COPY_RETRY_COUNT} > copy-results.json
+                    '''
+                }
+                archiveArtifacts artifacts: 'copy-results.json'
+            }
+        }
+    }
+}
+```
+
+### Security Best Practices for CI/CD
+
+#### Credential Management
+```bash
+# Use temporary credentials with limited scope
+export AWS_ROLE_ARN="arn:aws:iam::ACCOUNT:role/ECRCopyRole"
+export AWS_ROLE_SESSION_NAME="ci-copy-$(uuidgen)"
+
+# Limit role duration
+export AWS_ROLE_DURATION_SECONDS="3600"  # 1 hour max
+
+# Use specific ECR permissions only
+# ECR_COPY_POLICY: ecr:GetAuthorizationToken, ecr:BatchGetImage, ecr:PutImage
+```
+
+#### Audit and Monitoring
+```bash
+# Enable detailed logging for audit trails
+ci-copy --ci-mode --audit-log audit.log \
+        --log-level debug \
+        --output json
+
+# Include request IDs and timing for monitoring
+ci-copy --ci-mode --include-metrics \
+        --output json > metrics.json
+```
+
+### Exit Codes for CI Integration
+
+CI Copy returns specific exit codes for different scenarios:
+
+| Exit Code | Description | CI Action |
+|-----------|-------------|-----------|
+| `0` | Success | Continue pipeline |
+| `1` | General error | Fail pipeline |
+| `2` | Configuration error | Fix config and retry |
+| `3` | Authentication error | Check credentials |
+| `4` | Permission error | Review IAM policies |
+| `5` | Network/timeout error | Retry with backoff |
+| `6` | Source image not found | Check image exists |
+| `7` | Target repository error | Verify target setup |
+
+### Performance Optimization for CI
+
+```bash
+# Parallel processing for multiple images
+ci-copy --ci-mode --parallel 4 \
+        --images "app1:v1,app2:v1,app3:v1,app4:v1"
+
+# Skip verification for faster CI (when speed > safety)
+ci-copy --ci-mode --no-verify --fast \
+        --images "app:v1.0.0"
+
+# Use compressed output for large logs
+ci-copy --ci-mode --compress-logs \
+        --output json | gzip > results.json.gz
+```
 
 CI Copy includes a comprehensive system check to verify all dependencies and configurations are properly set up.
 
@@ -378,6 +711,15 @@ Detailed logging is provided with different verbosity levels:
 | **System Diagnostics** | ❌ None | ✅ `ci-copy check` command |
 | **Dependency Detection** | ❌ Manual troubleshooting | ✅ Automated dependency validation |
 | **Health Checks** | ❌ None | ✅ Pre-flight validation |
+| **CI/CD Integration** | ❌ Limited | ✅ Full CI/CD support |
+| **IAM Role Support** | ❌ Profile-based only | ✅ Assume role for CI/CD |
+| **Non-Interactive Mode** | ❌ None | ✅ `--ci-mode` flag |
+| **JSON Output** | ❌ Text only | ✅ Machine-readable output |
+| **Timeout/Retry** | ❌ Basic | ✅ Configurable timeout/retry |
+| **Environment Variables** | ❌ Limited | ✅ Full environment support |
+| **Exit Codes** | ❌ Generic | ✅ Specific error codes |
+| **Audit Logging** | ❌ None | ✅ Detailed audit trails |
+| **Security** | ❌ Profile credentials | ✅ Temporary credentials, IAM roles |
 
 ## Development
 
@@ -393,11 +735,21 @@ cargo build --release
 # Run tests
 cargo test
 
+# Test different environments
+cargo test -- --test-threads=1  # Sequential tests for AWS integration
+
 # Run system check for development
 RUST_LOG=debug cargo run -- check --verbose
 
+# Test CI/CD mode locally
+RUST_LOG=debug cargo run -- check --ci-mode --output json
+
 # Test copy functionality with logging
 RUST_LOG=debug cargo run -- copy --config test-config.yaml --verbose
+
+# Test IAM role integration (requires AWS setup)
+export AWS_ROLE_ARN="arn:aws:iam::123456789012:role/TestRole"
+cargo run -- check --role $AWS_ROLE_ARN --verbose
 ```
 
 ### Testing Dependencies
@@ -410,17 +762,44 @@ cargo run -- check --verbose
 
 # Test with different copy methods
 cargo run -- copy --force-docker --repository test-repo --tag test-tag
+
+# CI/CD integration testing
+cargo run -- --ci-mode --output json --timeout 60 --retry 1 \
+             --images "test-app:latest"
+
+# Performance testing with parallel operations
+cargo run -- copy --parallel 4 --images "app1:v1,app2:v1,app3:v1,app4:v1"
+```
+
+### CI/CD Testing
+
+```bash
+# Test assume role functionality (requires proper IAM setup)
+export AWS_ROLE_ARN="arn:aws:iam::ACCOUNT:role/TestRole"
+export AWS_ROLE_SESSION_NAME="test-session"
+cargo run -- check --ci-mode
+
+# Test environment variable configuration
+export CI_COPY_CONFIG="test-config.yaml"
+export CI_COPY_PARALLEL="2"
+export CI_COPY_TIMEOUT="300"
+cargo run -- copy --ci-mode
+
+# Test JSON output parsing
+cargo run -- check --ci-mode --output json | jq '.summary.ready'
 ```
 
 ### Dependencies
 
 Key dependencies include:
 - `tokio` - Async runtime
-- `clap` - Command line parsing
+- `clap` - Command line parsing with subcommands
 - `serde` - Serialization/deserialization
 - `aws-sdk-ecr` - AWS ECR client
+- `aws-sdk-sts` - AWS STS for role assumption
 - `docker-api` - Docker API client (Windows/fallback)
 - Platform detection utilities for copy method selection
+- JSON output formatting for CI/CD integration
 
 ## Contributing
 
